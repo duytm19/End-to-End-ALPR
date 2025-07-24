@@ -54,7 +54,7 @@ else:
 
 
 # THAY THẾ TOÀN BỘ HÀM CŨ BẰNG HÀM MỚI NÀY
-def process_image(frame, image_name, verbose=True):
+def process_image(frame, image_name, verbose=False):
     """
     Hàm xử lý ảnh/khung hình.
     - verbose=True: In ra đầy đủ log, dùng cho ảnh đơn.
@@ -200,6 +200,7 @@ elif app_mode == "ALPR 1 thư mục":
                 
                 progress_bar = st.progress(0)
                 all_results = []
+
                 
                 # Nơi hiển thị ảnh
                 image_placeholder = st.empty()
@@ -273,9 +274,9 @@ elif app_mode == "ALPR từ Video":
             progress_bar = st.progress(0)
             status_text = st.empty()
             image_placeholder = st.empty()
-            all_results = []
-            seen_plates = set() # Dùng để tránh lưu trùng lặp biển số
-
+            # all_results = []
+            # seen_plates = set() # Dùng để tránh lưu trùng lặp biển số
+            best_results = {}
             frame_count = 0
             with st.spinner(f"Đang xử lý video... có tổng cộng {total_frames} khung hình."):
                 while cap.isOpened():
@@ -292,10 +293,14 @@ elif app_mode == "ALPR từ Video":
                         
                         if results_list:
                             for result in results_list:
-                                # Chỉ thêm biển số mới chưa từng thấy
-                                if result['full_text'] not in seen_plates:
-                                    all_results.append(result)
-                                    seen_plates.add(result['full_text'])
+                                lp_text = result['full_text']
+                                # Chuyển đổi confidence sang kiểu float để so sánh
+                                new_confidence = float(result['avg_confidence'])
+
+                                # Nếu biển số chưa có trong kết quả hoặc có confidence cao hơn,
+                                # thì lưu hoặc cập nhật kết quả mới.
+                                if lp_text not in best_results or new_confidence > float(best_results[lp_text]['avg_confidence']):
+                                    best_results[lp_text] = result
                         
                         image_placeholder.image(result_image, channels="BGR", caption=f"Khung hình {frame_count}")
                         out_writer.write(result_image)
@@ -315,9 +320,11 @@ elif app_mode == "ALPR từ Video":
             # Hiển thị video kết quả
             st.video(output_video_path)
 
-            if all_results:
-                st.subheader("Tổng hợp các biển số đã nhận diện:")
-                df_all_results = pd.DataFrame(all_results)
+            if best_results:
+                st.subheader("Tổng hợp các biển số đã nhận diện (kết quả tốt nhất cho mỗi xe):")
+                # Chuyển các giá trị của dictionary thành list để tạo DataFrame
+                final_results = list(best_results.values())
+                df_all_results = pd.DataFrame(final_results)
                 st.dataframe(df_all_results)
 
                 @st.cache_data
