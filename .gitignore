@@ -1,1 +1,6 @@
 .venv
+.vscode
+__pycache__
+processed_lp
+output
+successful_vehicles
