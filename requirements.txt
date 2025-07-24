@@ -1,9 +1,10 @@
-paddlepaddle-gpu
+paddlepaddle
 paddleocr==2.7.3
 opencv-python-headless
 shapely
 pyclipper
 ultralytics
 pandas
-tensorflow[and-cuda]
+tensorflow
 numpy
+streamlit
