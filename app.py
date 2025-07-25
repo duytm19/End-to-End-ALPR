@@ -54,6 +54,8 @@ else:
 
 
 def process_single_vehicle(vehicle_crop, vehicle_id, lp_conf, two_line_ratio, verbose=False):
+    """Xử lý một ảnh xe đã crop để tìm và đọc biển số."""
+    # This function remains largely the same but is now called within the video loop for each tracked vehicle.
     processed_vehicle_img = vehicle_crop.copy()
     results_list = []
 
@@ -72,8 +74,7 @@ def process_single_vehicle(vehicle_crop, vehicle_id, lp_conf, two_line_ratio, ve
 
     if full_text:
         results_list.append({
-            'frame': vehicle_id.split('_')[0], 'id_vehicle': vehicle_id,
-            'full_text': full_text, 'avg_confidence': f"{avg_confidence:.4f}"
+            'full_text': full_text, 'avg_confidence': avg_confidence
         })
 
         label = f"LP:{full_text}"
@@ -86,11 +87,14 @@ def process_single_vehicle(vehicle_crop, vehicle_id, lp_conf, two_line_ratio, ve
 
 
 def run_alpr_on_frame(frame, image_name, vehicle_conf, lp_conf, two_line_ratio, verbose=False):
+    """Chạy ALPR trên một khung hình ảnh duy nhất (chế độ ảnh tĩnh)."""
+    # This function is now primarily for single-image mode and is kept for that purpose.
     output_image = frame.copy()
     all_results = []
 
     status_context = st.status(f"🔍 Đang xử lý {image_name}...", expanded=True) if verbose else None
 
+    # In single image mode, we don't need tracking.
     vehicle_boxes = vehicle_detector.detect(frame, vehicle_conf)
 
     if not np.any(vehicle_boxes):
@@ -105,6 +109,8 @@ def run_alpr_on_frame(frame, image_name, vehicle_conf, lp_conf, two_line_ratio, 
         vehicle_id = f"{Path(image_name).stem}_{i}"
         vehicle_crop = frame[int(y1):int(y2), int(x1):int(x2)]
 
+        # We call a modified version of process_single_vehicle for simplicity
+        # For single image, the logic remains straightforward.
         processed_vehicle, results = process_single_vehicle(
             vehicle_crop, vehicle_id, lp_conf, two_line_ratio, verbose=verbose
         )
@@ -112,6 +118,12 @@ def run_alpr_on_frame(frame, image_name, vehicle_conf, lp_conf, two_line_ratio, 
         output_image[int(y1):int(y2), int(x1):int(x2)] = processed_vehicle
 
         if results:
+            # Add vehicle_id to the results dictionary
+            for res in results:
+                res['id_vehicle'] = vehicle_id
+                res['frame'] = Path(image_name).stem
+                # Format confidence for consistency
+                res['avg_confidence'] = f"{res['avg_confidence']:.4f}"
             all_results.extend(results)
             cv2.rectangle(output_image, (int(x1), int(y1)), (int(x2), int(y2)), (36, 255, 12), 2)
 
@@ -119,6 +131,7 @@ def run_alpr_on_frame(frame, image_name, vehicle_conf, lp_conf, two_line_ratio, 
         status_context.update(label="Hoàn tất!", state="complete", expanded=False)
 
     return output_image, all_results
+
 
 # --- GIAO DIỆN CHÍNH ---
 
@@ -173,11 +186,11 @@ if app_mode == "ALPR 1 ảnh":
             else:
                 st.info("Không nhận diện được biển số nào trong ảnh.")
 
-# --- CHẾ ĐỘ 2: XỬ LÝ THƯ MỤC (ĐÃ CẬP NHẬT) ---
+
+# --- CHẾ ĐỘ 2: XỬ LÝ THƯ MỤC ---
 elif app_mode == "ALPR 1 thư mục":
     st.header("Chế độ 2: Xử lý nhiều ảnh từ một thư mục")
     
-    # Cho phép người dùng tải lên nhiều file
     uploaded_files = st.file_uploader(
         "Tải lên các ảnh (JPG, PNG) từ thư mục của bạn...", 
         type=["jpg", "jpeg", "png"],
@@ -191,10 +204,7 @@ elif app_mode == "ALPR 1 thư mục":
             progress_bar = st.progress(0, text="Bắt đầu xử lý...")
             all_results = []
             
-            # Dùng io.BytesIO để tạo file zip trong bộ nhớ
             zip_buffer = io.BytesIO()
-            
-            # Dictionary để lưu ảnh kết quả trong bộ nhớ
             processed_images_data = {}
 
             for i, uploaded_file in enumerate(uploaded_files):
@@ -202,35 +212,30 @@ elif app_mode == "ALPR 1 thư mục":
                 progress_text = f"Đang xử lý ảnh: {image_name} ({i + 1}/{len(uploaded_files)})"
                 progress_bar.progress((i + 1) / len(uploaded_files), text=progress_text)
                 
-                # Đọc ảnh từ file tải lên
                 file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
                 frame = cv2.imdecode(file_bytes, 1)
 
-                # Chạy ALPR trên ảnh
                 result_image, results_list = run_alpr_on_frame(
                     frame, image_name, vehicle_conf_adj, lp_conf_adj, ratio_adj, verbose=False
                 )
                 
-                # Mã hóa ảnh kết quả sang định dạng PNG để lưu vào bộ nhớ
                 is_success, buffer = cv2.imencode(".png", result_image)
                 if is_success:
                     processed_images_data[image_name] = io.BytesIO(buffer)
 
-                # Thêm tên file vào kết quả để xuất CSV
                 if results_list:
+                    # Rename 'frame' column to 'image_name' for clarity
                     for result in results_list:
-                        result['image_name'] = image_name
+                        result['image_name'] = result.pop('frame')
                     all_results.extend(results_list)
                 
-                time.sleep(0.1) # Dừng một chút để UI mượt hơn
+                time.sleep(0.1) 
 
             progress_bar.empty()
             st.success("🎉 Hoàn tất xử lý tất cả ảnh!")
 
-            # --- TẠO CÁC NÚT DOWNLOAD ---
             col1, col2 = st.columns(2)
 
-            # 1. NÚT TẢI FILE ZIP
             with col1:
                 if processed_images_data:
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -245,11 +250,9 @@ elif app_mode == "ALPR 1 thư mục":
                         use_container_width=True
                     )
 
-            # 2. NÚT TẢI FILE CSV
             with col2:
                 if all_results:
                     df = pd.DataFrame(all_results)
-                    # Đổi tên và sắp xếp lại các cột theo yêu cầu
                     df.rename(columns={
                         'id_vehicle': 'vehicle_id',
                         'full_text': 'text',
@@ -266,24 +269,17 @@ elif app_mode == "ALPR 1 thư mục":
                         use_container_width=True
                     )
             
-            # Hiển thị bảng kết quả tổng hợp
             if all_results:
                 st.subheader("Tổng hợp kết quả:")
                 st.dataframe(df_final)
             else:
                 st.info("Không nhận diện được biển số nào trong các ảnh đã chọn.")
 
-
-# --- CHẾ ĐỘ 3: XỬ LÝ VIDEO ---
-# --- CHẾ ĐỘ 3: XỬ LÝ VIDEO (ĐÃ CẬP NHẬT VỚI BỘ THEO DÕI XE) ---
-# --- CHẾ ĐỘ 3: XỬ LÝ VIDEO (PHIÊN BẢN TỐI ƯU HÓA) ---
+# --- CHẾ ĐỘ 3: XỬ LÝ VIDEO (SỬ DỤNG BYTETRACK CỦA YOLO) ---
 elif app_mode == "ALPR từ Video":
     st.header("Chế độ 3: Xử lý từ một file Video")
     st.sidebar.subheader("Tinh chỉnh Video")
-    # Tăng giá trị mặc định của frame_skip vì tracker đã hiệu quả hơn
     frame_skip = st.sidebar.slider("Xử lý mỗi N khung hình (frame skip)", 1, 30, 5)
-    # Thêm tùy chọn cho khoảng thời gian phát hiện lại xe
-    detection_interval = st.sidebar.slider("Phát hiện lại xe sau mỗi X khung hình xử lý", 1, 50, 10, help="Giá trị càng cao, tốc độ càng nhanh nhưng có thể bỏ lỡ xe mới. Giá trị này được nhân với Frame Skip.")
 
     uploaded_video = st.file_uploader("Tải lên một video (MP4, MOV, AVI)...", type=["mp4", "mov", "avi"])
 
@@ -299,8 +295,8 @@ elif app_mode == "ALPR từ Video":
         cap_preview.release()
 
         if ret:
-            st.subheader("Bước 1: (Bắt buộc) Xác định Vùng Quan Tâm (Region of Interest)")
-            st.info("Bộ đếm và nhận dạng sẽ chỉ hoạt động với những xe đi vào vùng ROI bạn đã vẽ.")
+            st.subheader("Bước 1: (Tùy chọn) Xác định Vùng Quan Tâm (Region of Interest)")
+            st.info("Nhận dạng sẽ chỉ được thực hiện với những xe có tâm nằm trong vùng ROI bạn đã vẽ. Nếu không vẽ, toàn bộ khung hình sẽ được xử lý.")
             
             preview_frame = first_frame.copy()
             height, width, _ = preview_frame.shape
@@ -322,10 +318,6 @@ elif app_mode == "ALPR từ Video":
 
         st.subheader("Bước 2: Bắt đầu xử lý video")
         if st.button("🎬 Bắt đầu xử lý Video"):
-            if roi_rect is None or (roi_rect[0] == 0 and roi_rect[2] == width and roi_rect[1] == 0 and roi_rect[3] == height):
-                st.warning("Vui lòng xác định một vùng ROI cụ thể ở Bước 1 để bộ đếm hoạt động chính xác.")
-                st.stop()
-
             cap = cv2.VideoCapture(tfile.name)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS)
@@ -333,161 +325,116 @@ elif app_mode == "ALPR từ Video":
             out_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             output_video_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
-
-            # --- KHỞI TẠO CÁC BIẾN CHO TRACKER TỐI ƯU ---
-            trackers = {} # {tracker_id: {'tracker': cv2.Tracker, 'box': (x,y,w,h), 'id_vehicle': None}}
-            next_tracker_id = 0
-            vehicle_pass_count = 0
-
+            out_writer = cv2.VideoWriter(output_video_path, fourcc, fps / frame_skip, (out_width, out_height))
+            
+            # --- KHỞI TẠO BIẾN CHO TRACKER ---
+            track_history = {} # {track_id: {'text': '...', 'confidence': 0.9, 'frame': N}}
+            
             progress_bar = st.progress(0, text="Bắt đầu xử lý...")
             status_text = st.empty()
             image_placeholder = st.empty()
-            all_video_results = []
             frame_count = 0
-            processed_frame_count = 0
 
-            with st.spinner("Đang xử lý video với bộ theo dõi tối ưu..."):
+            with st.spinner("Đang xử lý video với ByteTrack..."):
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: break
                     frame_count += 1
                     
-                    # Luôn bắt đầu với một khung hình sạch để vẽ lên
+                    if frame_count % frame_skip != 0:
+                        continue
+                    
+                    status_text.text(f"Đang xử lý khung hình {frame_count}/{total_frames}...")
                     display_frame = frame.copy()
                     
-                    # KIỂM TRA XEM ĐÂY CÓ PHẢI LÀ KHUNG HÌNH CẦN XỬ LÝ KHÔNG
-                    if frame_count % frame_skip == 0:
-                        processed_frame_count += 1
-                        status_text.text(f"Đang xử lý khung hình {frame_count}/{total_frames}...")
+                    # --- SỬ DỤNG YOLO TRACKER ---
+                    results = vehicle_detector.model.track(frame, persist=True, conf=vehicle_conf_adj, tracker="bytetrack.yaml", verbose=False)
+                    
+                    if results[0].boxes.id is not None:
+                        boxes = results[0].boxes.xyxy.cpu().numpy()
+                        track_ids = results[0].boxes.id.int().cpu().tolist()
 
-                        # 1. CHẠY PHÁT HIỆN XE ĐỊNH KỲ
-                        if processed_frame_count % detection_interval == 0:
-                            vehicle_boxes = vehicle_detector.detect(frame, vehicle_conf_adj)
-                            for (x1, y1, x2, y2) in vehicle_boxes:
-                                box_w, box_h = (x2 - x1), (y2 - y1)
-                                center_x, center_y = x1 + box_w / 2, y1 + box_h / 2
+                        for box, track_id in zip(boxes, track_ids):
+                            x1, y1, x2, y2 = box
+                            center_x = (x1 + x2) / 2
+                            center_y = (y1 + y2) / 2
+                            rx1, ry1, rx2, ry2 = roi_rect
+
+                            # Chỉ xử lý xe trong vùng ROI
+                            if rx1 < center_x < rx2 and ry1 < center_y < ry2:
+                                vehicle_crop = frame[int(y1):int(y2), int(x1):int(x2)]
                                 
-                                is_new = True
-                                for tid, tdata in trackers.items():
-                                    tx, ty, tw, th = tdata['box']
-                                    if abs(center_x - (tx + tw/2)) < tw/2 and abs(center_y - (ty + th/2)) < th/2:
-                                        is_new = False
-                                        break
+                                # Đọc biển số liên tục
+                                _, ocr_results = process_single_vehicle(
+                                    vehicle_crop, str(track_id), lp_conf_adj, ratio_adj, verbose=False
+                                )
                                 
-                                if is_new:
-                                    bbox_int = (int(x1), int(y1), int(box_w), int(box_h))
-                                    new_tracker = cv2.TrackerCSRT_create()
-                                    new_tracker.init(frame, bbox_int)
-                                    trackers[next_tracker_id] = {
-                                        'tracker': new_tracker,
-                                        'box': bbox_int,
-                                        'id_vehicle': None,
-                                        'processed_image': None
-                                    }
-                                    next_tracker_id += 1
+                                if ocr_results:
+                                    current_best = ocr_results[0]
+                                    
+                                    # Cập nhật nếu đây là nhận diện tốt hơn
+                                    if track_id not in track_history or current_best['avg_confidence'] > track_history[track_id]['confidence']:
+                                        track_history[track_id] = {
+                                            'text': current_best['full_text'],
+                                            'confidence': current_best['avg_confidence'],
+                                            'frame': frame_count,
+                                        }
 
-                        # 2. CẬP NHẬT VỊ TRÍ TỪ CÁC TRACKER
-                        failed_trackers = []
-                        for tracker_id, tdata in trackers.items():
-                            success, box = tdata['tracker'].update(frame)
-                            if success:
-                                trackers[tracker_id]['box'] = box
-                                x, y, w, h = [int(v) for v in box]
-                                center_x, center_y = x + w / 2, y + h / 2
-                                rx1, ry1, rx2, ry2 = roi_rect
-
-                                if rx1 < center_x < rx2 and ry1 < center_y < ry2:
-                                    if tdata['id_vehicle'] is None:
-                                        vehicle_pass_count += 1
-                                        assigned_id = vehicle_pass_count
-                                        trackers[tracker_id]['id_vehicle'] = assigned_id
-
-                                        vehicle_crop = frame[y:y+h, x:x+w]
-                                        processed_vehicle, results = process_single_vehicle(
-                                            vehicle_crop, f"v_{assigned_id}", lp_conf_adj, ratio_adj, verbose=False
-                                        )
-                                        trackers[tracker_id]['processed_image'] = processed_vehicle
-
-                                        if results:
-                                            for r in results:
-                                                r['frame'] = frame_count
-                                                r['id_vehicle'] = assigned_id
-                                            all_video_results.extend(results)
-                            else:
-                                failed_trackers.append(tracker_id)
-                        
-                        # 3. XÓA CÁC TRACKER BỊ LỖI
-                        for tracker_id in failed_trackers:
-                            del trackers[tracker_id]
-
-                    # ---- LOGIC VẼ (CHẠY TRÊN MỌI KHUNG HÌNH) ----
-                    # Vẽ vùng ROI
+                    # --- VẼ KẾT QUẢ ---
                     rx1, ry1, rx2, ry2 = roi_rect
                     cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (36, 255, 12), 2)
                     
-                    # Vẽ tất cả các xe đang được theo dõi
-                    for tracker_id, tdata in trackers.items():
-                        x, y, w, h = [int(v) for v in tdata['box']]
-                        
-                        # Vẽ lại ảnh xe đã xử lý nếu có
-                        # Vẽ lại ảnh xe đã xử lý nếu có
-                        if tdata.get('processed_image') is not None:
-                            img_h, img_w, _ = display_frame.shape
-                            crop_h, crop_w, _ = tdata['processed_image'].shape
+                    if results[0].boxes.id is not None:
+                        for box, track_id in zip(results[0].boxes.xyxy.cpu().numpy(), results[0].boxes.id.int().cpu().tolist()):
+                            x1, y1, x2, y2 = [int(v) for v in box]
                             
-                            # ---- SỬA LỖI: THÊM KIỂM TRA TOÀN DIỆN HƠN ----
-                            # Đảm bảo toàn bộ vùng ảnh nằm trọn trong khung hình trước khi vẽ
-                            if y >= 0 and x >= 0 and (y + crop_h) <= img_h and (x + crop_w) <= img_w:
-                                display_frame[y:y+crop_h, x:x+crop_w] = tdata['processed_image']
-                        
-                        # Vẽ hộp và ID
-                        assigned_id = tdata.get('id_vehicle')
-                        if assigned_id is not None:
-                            id_label = f"ID: {assigned_id}"
-                            cv2.rectangle(display_frame, (x, y), (x + w, y + h), (36, 255, 12), 2)
-                            (lw, lh), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-                            cv2.rectangle(display_frame, (x, y - lh - 10), (x + lw, y), (36, 255, 12), -1)
-                            cv2.putText(display_frame, id_label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                            # Vẽ hộp bao quanh xe
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (36, 255, 12), 2)
+                            
+                            # Hiển thị ID và biển số tốt nhất đã tìm thấy
+                            label = f"ID: {track_id}"
+                            if track_id in track_history:
+                                label += f" LP: {track_history[track_id]['text']}"
+
+                            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                            cv2.rectangle(display_frame, (x1, y1 - h - 10), (x1 + w, y1), (36, 255, 12), -1)
+                            cv2.putText(display_frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
                     
-                    # ---- GHI KHUNG HÌNH VÀ CẬP NHẬT GIAO DIỆN ----
-                    # Ghi lại MỌI khung hình đã được vẽ vào video output
                     out_writer.write(display_frame)
-                    
-                    # Chỉ cập nhật giao diện trên các frame đã xử lý để tránh lag
-                    if frame_count % frame_skip == 0:
-                        image_placeholder.image(display_frame, channels="BGR")
-                        progress_bar.progress(frame_count / total_frames)
+                    image_placeholder.image(display_frame, channels="BGR")
+                    progress_bar.progress(frame_count / total_frames)
+
             cap.release()
             out_writer.release()
             os.remove(tfile.name) 
             st.success("🎉 Hoàn tất xử lý video!")
 
-            # --- HIỂN THỊ VÀ TẢI KẾT QUẢ VIDEO ---
             st.subheader("Kết quả Video đã xử lý")
             with open(output_video_path, 'rb') as f:
                 video_bytes = f.read()
             st.video(video_bytes)
             st.download_button(label="📥 Tải video đã xử lý", data=video_bytes, file_name=f"processed_{video_filename}", mime="video/mp4")
             os.remove(output_video_path)
-
-            if all_video_results:
+            
+            if track_history:
                 st.subheader("Tổng hợp các lượt nhận diện trong video:")
-                df_all = pd.DataFrame(all_video_results)
-                df_all.rename(columns={'full_text': 'text', 'avg_confidence': 'confidence'}, inplace=True)
-                df_all['confidence'] = pd.to_numeric(df_all['confidence']) # Đảm bảo confidence là số
-                
-                # Giữ lại kết quả tốt nhất cho mỗi ID xe
-                df_final = df_all.loc[df_all.groupby('id_vehicle')['confidence'].idxmax()]
-                df_final = df_final[['frame', 'id_vehicle', 'text', 'confidence']].sort_values(by='id_vehicle')
-                df_final['confidence'] = df_final['confidence'].apply(lambda x: f"{x:.4f}")
+                final_results = []
+                for track_id, data in track_history.items():
+                    final_results.append({
+                        'frame': data['frame'],
+                        'id_vehicle': track_id,
+                        'text': data['text'],
+                        'confidence': f"{data['confidence']:.4f}"
+                    })
 
+                df_final = pd.DataFrame(final_results).sort_values(by='id_vehicle')
                 st.dataframe(df_final)
 
                 csv_data = df_final.to_csv(index=False).encode('utf-8')
                 st.download_button(label="📥 Tải kết quả nhận diện (CSV)", data=csv_data, file_name=f"results_{Path(video_filename).stem}.csv", mime='text/csv')
             else:
                 st.info("Không nhận diện được biển số nào hợp lệ trong video.")
+
 
 # --- Màn hình chờ ---
 else:
