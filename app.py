@@ -276,18 +276,23 @@ elif app_mode == "ALPR 1 thư mục":
 
 # --- CHẾ ĐỘ 3: XỬ LÝ VIDEO ---
 # --- CHẾ ĐỘ 3: XỬ LÝ VIDEO (ĐÃ CẬP NHẬT VỚI BỘ THEO DÕI XE) ---
+# --- CHẾ ĐỘ 3: XỬ LÝ VIDEO (PHIÊN BẢN TỐI ƯU HÓA) ---
 elif app_mode == "ALPR từ Video":
     st.header("Chế độ 3: Xử lý từ một file Video")
     st.sidebar.subheader("Tinh chỉnh Video")
-    frame_skip = st.sidebar.slider("Xử lý mỗi N khung hình (frame skip)", 1, 30, 10)
+    # Tăng giá trị mặc định của frame_skip vì tracker đã hiệu quả hơn
+    frame_skip = st.sidebar.slider("Xử lý mỗi N khung hình (frame skip)", 1, 30, 5)
+    # Thêm tùy chọn cho khoảng thời gian phát hiện lại xe
+    detection_interval = st.sidebar.slider("Phát hiện lại xe sau mỗi X khung hình xử lý", 1, 50, 10, help="Giá trị càng cao, tốc độ càng nhanh nhưng có thể bỏ lỡ xe mới. Giá trị này được nhân với Frame Skip.")
+
     uploaded_video = st.file_uploader("Tải lên một video (MP4, MOV, AVI)...", type=["mp4", "mov", "avi"])
 
     roi_rect = None
     if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False)
         tfile.write(uploaded_video.read())
-        tfile.close() 
-        
+        tfile.close()
+
         video_filename = uploaded_video.name
         cap_preview = cv2.VideoCapture(tfile.name)
         ret, first_frame = cap_preview.read()
@@ -295,7 +300,7 @@ elif app_mode == "ALPR từ Video":
 
         if ret:
             st.subheader("Bước 1: (Bắt buộc) Xác định Vùng Quan Tâm (Region of Interest)")
-            st.info("Bộ đếm sẽ chỉ hoạt động với những xe đi vào vùng ROI bạn đã vẽ.")
+            st.info("Bộ đếm và nhận dạng sẽ chỉ hoạt động với những xe đi vào vùng ROI bạn đã vẽ.")
             
             preview_frame = first_frame.copy()
             height, width, _ = preview_frame.shape
@@ -330,118 +335,129 @@ elif app_mode == "ALPR từ Video":
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (out_width, out_height))
 
-            # --- KHỞI TẠO BỘ THEO DÕI (TRACKER) ---
-            vehicle_tracker = {}  # {tracker_id: {'center': (x,y), 'unseen_frames': 0, 'id_vehicle': None}}
+            # --- KHỞI TẠO CÁC BIẾN CHO TRACKER TỐI ƯU ---
+            trackers = {} # {tracker_id: {'tracker': cv2.Tracker, 'box': (x,y,w,h), 'id_vehicle': None}}
             next_tracker_id = 0
             vehicle_pass_count = 0
-            DISTANCE_THRESHOLD = 75  # Ngưỡng khoảng cách để coi là cùng một xe (pixel)
-            MAX_UNSEEN_FRAMES = 10 # Số frame cho phép "mất dấu" một xe trước khi xóa
 
             progress_bar = st.progress(0, text="Bắt đầu xử lý...")
             status_text = st.empty()
             image_placeholder = st.empty()
             all_video_results = []
             frame_count = 0
+            processed_frame_count = 0
 
-            with st.spinner("Đang xử lý video với bộ theo dõi..."):
+            with st.spinner("Đang xử lý video với bộ theo dõi tối ưu..."):
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: break
                     frame_count += 1
                     
+                    # Luôn bắt đầu với một khung hình sạch để vẽ lên
                     display_frame = frame.copy()
+                    
+                    # KIỂM TRA XEM ĐÂY CÓ PHẢI LÀ KHUNG HÌNH CẦN XỬ LÝ KHÔNG
+                    if frame_count % frame_skip == 0:
+                        processed_frame_count += 1
+                        status_text.text(f"Đang xử lý khung hình {frame_count}/{total_frames}...")
+
+                        # 1. CHẠY PHÁT HIỆN XE ĐỊNH KỲ
+                        if processed_frame_count % detection_interval == 0:
+                            vehicle_boxes = vehicle_detector.detect(frame, vehicle_conf_adj)
+                            for (x1, y1, x2, y2) in vehicle_boxes:
+                                box_w, box_h = (x2 - x1), (y2 - y1)
+                                center_x, center_y = x1 + box_w / 2, y1 + box_h / 2
+                                
+                                is_new = True
+                                for tid, tdata in trackers.items():
+                                    tx, ty, tw, th = tdata['box']
+                                    if abs(center_x - (tx + tw/2)) < tw/2 and abs(center_y - (ty + th/2)) < th/2:
+                                        is_new = False
+                                        break
+                                
+                                if is_new:
+                                    bbox_int = (int(x1), int(y1), int(box_w), int(box_h))
+                                    new_tracker = cv2.TrackerCSRT_create()
+                                    new_tracker.init(frame, bbox_int)
+                                    trackers[next_tracker_id] = {
+                                        'tracker': new_tracker,
+                                        'box': bbox_int,
+                                        'id_vehicle': None,
+                                        'processed_image': None
+                                    }
+                                    next_tracker_id += 1
+
+                        # 2. CẬP NHẬT VỊ TRÍ TỪ CÁC TRACKER
+                        failed_trackers = []
+                        for tracker_id, tdata in trackers.items():
+                            success, box = tdata['tracker'].update(frame)
+                            if success:
+                                trackers[tracker_id]['box'] = box
+                                x, y, w, h = [int(v) for v in box]
+                                center_x, center_y = x + w / 2, y + h / 2
+                                rx1, ry1, rx2, ry2 = roi_rect
+
+                                if rx1 < center_x < rx2 and ry1 < center_y < ry2:
+                                    if tdata['id_vehicle'] is None:
+                                        vehicle_pass_count += 1
+                                        assigned_id = vehicle_pass_count
+                                        trackers[tracker_id]['id_vehicle'] = assigned_id
+
+                                        vehicle_crop = frame[y:y+h, x:x+w]
+                                        processed_vehicle, results = process_single_vehicle(
+                                            vehicle_crop, f"v_{assigned_id}", lp_conf_adj, ratio_adj, verbose=False
+                                        )
+                                        trackers[tracker_id]['processed_image'] = processed_vehicle
+
+                                        if results:
+                                            for r in results:
+                                                r['frame'] = frame_count
+                                                r['id_vehicle'] = assigned_id
+                                            all_video_results.extend(results)
+                            else:
+                                failed_trackers.append(tracker_id)
+                        
+                        # 3. XÓA CÁC TRACKER BỊ LỖI
+                        for tracker_id in failed_trackers:
+                            del trackers[tracker_id]
+
+                    # ---- LOGIC VẼ (CHẠY TRÊN MỌI KHUNG HÌNH) ----
+                    # Vẽ vùng ROI
                     rx1, ry1, rx2, ry2 = roi_rect
                     cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (36, 255, 12), 2)
-
-                    # Chỉ xử lý tại các frame được chỉ định (frame_skip)
-                    if frame_count % frame_skip == 0:
-                        status_text.text(f"Đang xử lý khung hình {frame_count}/{total_frames}...")
+                    
+                    # Vẽ tất cả các xe đang được theo dõi
+                    for tracker_id, tdata in trackers.items():
+                        x, y, w, h = [int(v) for v in tdata['box']]
                         
-                        # --- LOGIC THEO DÕI & ĐẾM XE ---
-                        vehicle_boxes = vehicle_detector.detect(frame, vehicle_conf_adj)
-                        
-                        current_detections = []
-                        for (x1, y1, x2, y2) in vehicle_boxes:
-                            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-                            current_detections.append({'center': center, 'box': (x1, y1, x2, y2), 'matched': False})
-                        
-                        matched_tracker_ids_this_frame = set()
-
-                        # 1. Cố gắng khớp các xe mới phát hiện với các xe đã theo dõi
-                        for tracker_id, tracker_data in vehicle_tracker.items():
-                            min_dist = float('inf')
-                            best_match_idx = -1
-                            for i, detection in enumerate(current_detections):
-                                if not detection['matched']:
-                                    dist = np.linalg.norm(np.array(tracker_data['center']) - np.array(detection['center']))
-                                    if dist < DISTANCE_THRESHOLD and dist < min_dist:
-                                        min_dist = dist
-                                        best_match_idx = i
+                        # Vẽ lại ảnh xe đã xử lý nếu có
+                        # Vẽ lại ảnh xe đã xử lý nếu có
+                        if tdata.get('processed_image') is not None:
+                            img_h, img_w, _ = display_frame.shape
+                            crop_h, crop_w, _ = tdata['processed_image'].shape
                             
-                            if best_match_idx != -1:
-                                current_detections[best_match_idx]['matched'] = True
-                                vehicle_tracker[tracker_id]['center'] = current_detections[best_match_idx]['center']
-                                vehicle_tracker[tracker_id]['unseen_frames'] = 0
-                                matched_tracker_ids_this_frame.add(tracker_id)
-                                # Gán tracker_id đã có cho xe được khớp
-                                current_detections[best_match_idx]['tracker_id'] = tracker_id
-
-                        # 2. Tạo tracker mới cho các xe không khớp
-                        for detection in current_detections:
-                            if not detection['matched']:
-                                vehicle_tracker[next_tracker_id] = {'center': detection['center'], 'unseen_frames': 0, 'id_vehicle': None}
-                                matched_tracker_ids_this_frame.add(next_tracker_id)
-                                detection['tracker_id'] = next_tracker_id
-                                next_tracker_id += 1
-
-                        # 3. Xử lý xe, kiểm tra ROI và gán ID nếu cần
-                        for detection in current_detections:
-                            center = detection['center']
-                            tracker_id = detection.get('tracker_id')
-                            if tracker_id is None: continue
-
-                            # Kiểm tra xe có nằm trong ROI không
-                            if rx1 < center[0] < rx2 and ry1 < center[1] < ry2:
-                                # Nếu xe nằm trong ROI và chưa được đếm -> Đếm và xử lý
-                                if vehicle_tracker[tracker_id]['id_vehicle'] is None:
-                                    vehicle_pass_count += 1
-                                    assigned_id = vehicle_pass_count
-                                    vehicle_tracker[tracker_id]['id_vehicle'] = assigned_id
-                                    
-                                    # Xử lý nhận dạng biển số cho xe vừa được đếm
-                                    x1, y1, x2, y2 = detection['box']
-                                    vehicle_crop = frame[int(y1):int(y2), int(x1):int(x2)]
-                                    processed_vehicle, results = process_single_vehicle(
-                                        vehicle_crop, f"v_{assigned_id}", lp_conf_adj, ratio_adj, verbose=False
-                                    )
-                                    display_frame[int(y1):int(y2), int(x1):int(x2)] = processed_vehicle
-
-                                    if results:
-                                        for r in results:
-                                            r['frame'] = frame_count
-                                            r['id_vehicle'] = assigned_id # Ghi đè ID cho đúng
-                                        all_video_results.extend(results)
-                                        cv2.rectangle(display_frame, (int(x1), int(y1)), (int(x2), int(y2)), (36, 255, 12), 2)
-                                
-                                # Hiển thị ID đã gán lên xe
-                                assigned_id = vehicle_tracker[tracker_id]['id_vehicle']
-                                id_label = f"ID: {assigned_id}"
-                                (w, h), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-                                cv2.rectangle(display_frame, (int(detection['box'][0]), int(detection['box'][1]) - h - 10), (int(detection['box'][0]) + w, int(detection['box'][1])), (0,0,255), -1)
-                                cv2.putText(display_frame, id_label, (int(detection['box'][0]), int(detection['box'][1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
+                            # ---- SỬA LỖI: THÊM KIỂM TRA TOÀN DIỆN HƠN ----
+                            # Đảm bảo toàn bộ vùng ảnh nằm trọn trong khung hình trước khi vẽ
+                            if y >= 0 and x >= 0 and (y + crop_h) <= img_h and (x + crop_w) <= img_w:
+                                display_frame[y:y+crop_h, x:x+crop_w] = tdata['processed_image']
                         
-                        # 4. Xóa các tracker đã mất dấu quá lâu
-                        lost_trackers = [tid for tid, tdata in vehicle_tracker.items() if tid not in matched_tracker_ids_this_frame]
-                        for tid in lost_trackers:
-                            vehicle_tracker[tid]['unseen_frames'] += 1
-                            if vehicle_tracker[tid]['unseen_frames'] > MAX_UNSEEN_FRAMES:
-                                del vehicle_tracker[tid]
-
-                    # Ghi frame vào video output
+                        # Vẽ hộp và ID
+                        assigned_id = tdata.get('id_vehicle')
+                        if assigned_id is not None:
+                            id_label = f"ID: {assigned_id}"
+                            cv2.rectangle(display_frame, (x, y), (x + w, y + h), (36, 255, 12), 2)
+                            (lw, lh), _ = cv2.getTextSize(id_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                            cv2.rectangle(display_frame, (x, y - lh - 10), (x + lw, y), (36, 255, 12), -1)
+                            cv2.putText(display_frame, id_label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                    
+                    # ---- GHI KHUNG HÌNH VÀ CẬP NHẬT GIAO DIỆN ----
+                    # Ghi lại MỌI khung hình đã được vẽ vào video output
                     out_writer.write(display_frame)
-                    image_placeholder.image(display_frame, channels="BGR")
-                    progress_bar.progress(frame_count / total_frames)
-
+                    
+                    # Chỉ cập nhật giao diện trên các frame đã xử lý để tránh lag
+                    if frame_count % frame_skip == 0:
+                        image_placeholder.image(display_frame, channels="BGR")
+                        progress_bar.progress(frame_count / total_frames)
             cap.release()
             out_writer.release()
             os.remove(tfile.name) 
@@ -458,12 +474,14 @@ elif app_mode == "ALPR từ Video":
             if all_video_results:
                 st.subheader("Tổng hợp các lượt nhận diện trong video:")
                 df_all = pd.DataFrame(all_video_results)
-                # Đổi tên cột và sắp xếp lại
                 df_all.rename(columns={'full_text': 'text', 'avg_confidence': 'confidence'}, inplace=True)
-                # Giữ lại kết quả tốt nhất cho mỗi ID xe (lượt có confidence cao nhất)
+                df_all['confidence'] = pd.to_numeric(df_all['confidence']) # Đảm bảo confidence là số
+                
+                # Giữ lại kết quả tốt nhất cho mỗi ID xe
                 df_final = df_all.loc[df_all.groupby('id_vehicle')['confidence'].idxmax()]
                 df_final = df_final[['frame', 'id_vehicle', 'text', 'confidence']].sort_values(by='id_vehicle')
-                
+                df_final['confidence'] = df_final['confidence'].apply(lambda x: f"{x:.4f}")
+
                 st.dataframe(df_final)
 
                 csv_data = df_final.to_csv(index=False).encode('utf-8')
