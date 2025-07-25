@@ -53,7 +53,7 @@ def denoise_full_plate(image_bgr, denoising_model):
     final_denoised_img = cv2.resize(contrast_enhanced_img, (original_w, original_h))
     return final_denoised_img
 
-def process_lp_for_ocr(lp_crop, denoising_model):
+def process_lp_for_ocr(lp_crop, denoising_model, two_line_ratio=config.TWO_LINE_LP_ASPECT_RATIO_THRESHOLD):
     """
     Pipeline tiền xử lý hoàn chỉnh cho ảnh biển số trước khi vào OCR.
     Bao gồm: Chỉnh nghiêng -> Khử nhiễu -> Cắt dòng (nếu cần) -> Resize & Pad.
@@ -68,7 +68,7 @@ def process_lp_for_ocr(lp_crop, denoising_model):
     image_parts = []
     
     # Kiểm tra và cắt biển số 2 dòng
-    if h > w * config.TWO_LINE_LP_ASPECT_RATIO_THRESHOLD:
+    if h > w * two_line_ratio:
         mid_point = h // 2
         top_line_img = denoised_full_lp[0:mid_point, :]
         bottom_line_img = denoised_full_lp[mid_point:, :]

@@ -13,7 +13,7 @@ TARGET_OCR_W = 64
 TWO_LINE_LP_ASPECT_RATIO_THRESHOLD = 0.4
 
 # --- Cấu hình cho các model detector ---
-VEHICLE_CONF_THRESHOLD = 0.15
+VEHICLE_CONF_THRESHOLD = 0.05
 LP_CONF_THRESHOLD = 0.35
 
 # --- Đường dẫn Output ---
