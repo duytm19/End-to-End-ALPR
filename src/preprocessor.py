@@ -1,16 +1,11 @@
-# src/preprocessor.py
-
 import cv2
 import numpy as np
-from . import config # Import từ file config trong cùng package
+from . import config
 
-def correct_skew_hough(image):
-    """
-    Phát hiện và điều chỉnh độ nghiêng bằng Hough Line Transform.
-    """
+def correct_skew_hough(image, threshold=40):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 200, apertureSize=3)
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40, minLineLength=30, maxLineGap=15)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=threshold, minLineLength=30, maxLineGap=15)
 
     if lines is None:
         return image
@@ -34,40 +29,34 @@ def correct_skew_hough(image):
     return rotated
 
 def denoise_full_plate(image_bgr, denoising_model):
-    """Khử nhiễu toàn bộ ảnh biển số."""
     original_h, original_w = image_bgr.shape[:2]
     gray_img = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     model_input_shape = denoising_model.input_shape
     h_model, w_model = model_input_shape[1], model_input_shape[2]
-    
+
     resized_img = cv2.resize(gray_img, (w_model, h_model))
     normalized_img = resized_img / 255.0
     input_tensor = np.expand_dims(normalized_img, axis=(0, -1))
-    
+
     predicted_tensor = denoising_model.predict(input_tensor, verbose=0)
     denoised_normalized = np.squeeze(predicted_tensor, axis=(0, -1))
     denoised_img_model_size = (denoised_normalized * 255).astype(np.uint8)
-    
+
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     contrast_enhanced_img = clahe.apply(denoised_img_model_size)
     final_denoised_img = cv2.resize(contrast_enhanced_img, (original_w, original_h))
     return final_denoised_img
 
-def process_lp_for_ocr(lp_crop, denoising_model, two_line_ratio=config.TWO_LINE_LP_ASPECT_RATIO_THRESHOLD):
-    """
-    Pipeline tiền xử lý hoàn chỉnh cho ảnh biển số trước khi vào OCR.
-    Bao gồm: Chỉnh nghiêng -> Khử nhiễu -> Cắt dòng (nếu cần) -> Resize & Pad.
-    """
+def process_lp_for_ocr(lp_crop, denoising_model, two_line_ratio=config.TWO_LINE_LP_ASPECT_RATIO_THRESHOLD, hough_threshold=40):
     if lp_crop.size == 0:
         return []
-    
-    corrected_image = correct_skew_hough(lp_crop)
+
+    corrected_image = correct_skew_hough(lp_crop, threshold=hough_threshold)
     denoised_full_lp = denoise_full_plate(corrected_image, denoising_model)
-    
+
     h, w = denoised_full_lp.shape
     image_parts = []
-    
-    # Kiểm tra và cắt biển số 2 dòng
+
     if h > w * two_line_ratio:
         mid_point = h // 2
         top_line_img = denoised_full_lp[0:mid_point, :]
@@ -82,12 +71,12 @@ def process_lp_for_ocr(lp_crop, denoising_model, two_line_ratio=config.TWO_LINE_
         h_part, w_part = part.shape
         scale = config.TARGET_OCR_H / h_part
         new_w = min(int(w_part * scale), config.TARGET_OCR_W)
-        
+
         resized_for_ocr = cv2.resize(part, (new_w, config.TARGET_OCR_H))
         padded_img = np.ones((config.TARGET_OCR_H, config.TARGET_OCR_W), dtype=np.uint8) * 255
-        
+
         start_x = (config.TARGET_OCR_W - new_w) // 2
         padded_img[:, start_x:start_x + new_w] = resized_for_ocr
         processed_images_for_ocr.append(padded_img)
-        
+
     return processed_images_for_ocr
